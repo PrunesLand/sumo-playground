@@ -25,31 +25,31 @@ def inspect_traffic_lights():
     print("=" * 60)
 
     # 2. Iterate through each intersection to find its parameters
-    for tls_id in tls_ids:
-        print(f"Intersection ID: {tls_id}")
+    # for tls_id in tls_ids:
+    #     print(f"Intersection ID: {tls_id}")
         
-        # Get the logic (the schedule) currently active on this light
-        # getAllProgramLogics returns a list of logic objects. We take the first one (default).
-        logics = traci.trafficlight.getAllProgramLogics(tls_id)
-        current_logic = logics[0]
+    #     # Get the logic (the schedule) currently active on this light
+    #     # getAllProgramLogics returns a list of logic objects. We take the first one (default).
+    #     logics = traci.trafficlight.getAllProgramLogics(tls_id)
+    #     current_logic = logics[0]
         
-        # Calculate Total Cycle Time (Sum of all phases)
-        total_cycle_time = sum(p.duration for p in current_logic.phases)
+    #     # Calculate Total Cycle Time (Sum of all phases)
+    #     total_cycle_time = sum(p.duration for p in current_logic.phases)
         
-        print(f"  > Current Program ID : {current_logic.programID}")
-        print(f"  > Total Cycle Time   : {total_cycle_time} seconds")
-        print(f"  > Number of Phases   : {len(current_logic.phases)}")
-        print(f"  > Phase Breakdown    :")
+    #     print(f"  > Current Program ID : {current_logic.programID}")
+    #     print(f"  > Total Cycle Time   : {total_cycle_time} seconds")
+    #     print(f"  > Number of Phases   : {len(current_logic.phases)}")
+    #     print(f"  > Phase Breakdown    :")
         
-        # Print details for every phase
-        for i, phase in enumerate(current_logic.phases):
-            # We explicitly mark phases that are usually NOT modifiable (Yellow lights)
-            is_yellow = "y" in phase.state.lower()
-            modifiable_marker = "[FIXED]" if is_yellow else "[MODIFIABLE]"
+    #     # Print details for every phase
+    #     for i, phase in enumerate(current_logic.phases):
+    #         # We explicitly mark phases that are usually NOT modifiable (Yellow lights)
+    #         is_yellow = "y" in phase.state.lower()
+    #         modifiable_marker = "[FIXED]" if is_yellow else "[MODIFIABLE]"
             
-            print(f"      Phase {i}: {phase.duration}s  | State: {phase.state} {modifiable_marker}")
+    #         print(f"      Phase {i}: {phase.duration}s  | State: {phase.state} {modifiable_marker}")
             
-        print("-" * 60)
+    #     print("-" * 60)
 
     traci.close()
 
