@@ -44,10 +44,10 @@ def objective_function(params, tls_ids):
     
     # Stats collectors
     total_delay = 0.0
-    total_waiting_time = 0.0
-    vehicles_evaluated = set()
     num_teleport = 0
-    num_slow = 0
+    slow_vehicles = set()
+    vehicles_evaluated = set()
+    finished_vehicles_count = 0
     
     try:
         # Set traffic light timings
@@ -73,48 +73,52 @@ def objective_function(params, tls_ids):
             traci.trafficlight.setProgramLogic(tls_id, logic)
             traci.trafficlight.setProgram(tls_id, "random_search")
         
-        # Run simulation
+        # Run simulation with accumulation
         for step in range(SIMULATION_STEPS):
             traci.simulationStep()
-            time_steps_evaluated = 0
             
-            # Vehicle statistics
-            current_vehicles = traci.vehicle.getIDList()
-            for veh_id in current_vehicles:
+            # Helper to get delay for all active vehicles in this step
+            for veh_id in traci.vehicle.getIDList():
                 vehicles_evaluated.add(veh_id)
-                waiting_time = traci.vehicle.getAccumulatedWaitingTime(veh_id)
-                total_delay += waiting_time # Accumulating waiting time at every step is standard but leads to huge numbers
-                                            # Usually we just want the final waiting time, or average. 
-                                            # For objective function consistency check previous implementation:
-                                            # It accumulated waiting time every step. We keep this logic.
                 
+                # Count waiting time: if speed < 0.1 m/s, add 1 second to total delay
+                if traci.vehicle.getSpeed(veh_id) < 0.1:
+                    total_delay += 1.0
+                
+                # Track slow vehicles
                 if traci.vehicle.getSpeed(veh_id) < SLOW_THRESHOLD:
-                    num_slow += 1
+                    slow_vehicles.add(veh_id)
+            
+            # Count finished vehicles
+            finished_vehicles_count += len(traci.simulation.getArrivedIDList())
             
             num_teleport += traci.simulation.getStartingTeleportNumber()
-            
+        
         # Post-simulation stats
         vehicle_count = len(vehicles_evaluated)
         avg_delay = total_delay / vehicle_count if vehicle_count > 0 else 0
+        num_slow = len(slow_vehicles)
+        remaining_vehicles_count = len(traci.vehicle.getIDList())
         
     finally:
         traci.close()
     
-    # score = total_delay + (num_teleport * PENALTY_TELEPORT) + (num_slow * PENALTY_SLOW)
+    # Calculate final score
     score = total_delay + (num_slow * PENALTY_SLOW)
-
     
     stats = {
         "score": float(score),
         "total_delay": float(total_delay),
         "avg_delay_per_vehicle": float(avg_delay),
         "vehicle_count": int(vehicle_count),
+        "finished_vehicles": int(finished_vehicles_count),
+        "remaining_vehicles": int(remaining_vehicles_count),
         "teleported_vehicles": int(num_teleport),
-        "slow_vehicle_steps": int(num_slow),
+        "slow_vehicles": int(num_slow),
         "simulation_steps": SIMULATION_STEPS
     }
     
-    return score, stats
+    return float(score), stats
 
 
 def evaluate_single_iteration(iteration_num, param_space, tls_ids):
@@ -124,7 +128,7 @@ def evaluate_single_iteration(iteration_num, param_space, tls_ids):
     
     score, stats = objective_function(params, tls_ids)
     
-    print(f"Iteration {iteration_num + 1}: Score = {score:.2f}, Vehicles = {stats['vehicle_count']}")
+    print(f"Iteration {iteration_num + 1}: Score = {score:.2f}, Finished = {stats['finished_vehicles']}, Remaining = {stats['remaining_vehicles']}")
     return params, score, stats
 
 
@@ -161,7 +165,7 @@ def random_search(param_space, tls_ids, n_iterations=100, n_processors=None):
             best_score = score
             best_params = params.copy()
             best_stats = stats.copy()
-            print(f"New best found at iteration {i+1}: Score = {best_score:.2f}")
+            # print(f"New best found at iteration {i+1}: Score = {best_score:.2f}")
     
     return best_params, best_score, best_stats, history
 
@@ -186,10 +190,10 @@ if __name__ == "__main__":
     output_data = {
         "timestamp": datetime.datetime.now().isoformat(),
         "optimization_config": {
-            "iterations": 5,
+            "iterations": NUM_ITERATIONS,
             "cycle_duration": CYCLE_DURATION,
             "penalties": {
-                "teleport": PENALTY_TELEPORT,
+                # "teleport": PENALTY_TELEPORT,
                 "slow": PENALTY_SLOW
             }
         },
@@ -218,5 +222,8 @@ if __name__ == "__main__":
     print(f"Results saved to: {json_filename}")
     print(f"Best objective score: {best_score:.2f}")
     print(f"Total Vehicles: {best_stats['vehicle_count']}")
-    # print(f"Total Teleports: {best_stats['teleported_vehicles']}")
+    print(f"Finished Vehicles: {best_stats['finished_vehicles']}")
+    print(f"Remaining Vehicles: {best_stats['remaining_vehicles']}")
+    # print(f"Teleported Vehicles: {best_stats['teleported_vehicles']}")
+    print(f"Slow Vehicles: {best_stats['slow_vehicles']}")
     print(f"{'='*60}")
