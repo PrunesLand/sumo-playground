@@ -12,22 +12,26 @@ def _evaluate_params(args):
     """
     Helper function to evaluate a single parameter set.
     This needs to be a top-level function for multiprocessing to pickle it.
+    Calls objective_function directly to avoid pickling libsumo objects.
     """
-    objective_function, params, iteration = args
-    score = objective_function(params)
+    params, iteration, penalty_teleport, penalty_slow, slow_threshold = args
+    score = objective_function(params, penalty_teleport, penalty_slow, slow_threshold)
     return iteration, params, score
 
 
-def random_search(objective_function, param_space, n_iterations=100, minimize=True, n_jobs=None):
+def random_search(param_space, n_iterations=100, minimize=True, n_jobs=None, 
+                  penalty_teleport=1000, penalty_slow=10, slow_threshold=5.0):
     """
     Parallel random search optimization algorithm.
     
     Args:
-        objective_function: Function to optimize (takes dict of params)
         param_space: Dict mapping parameter names to (min, max) tuples
         n_iterations: Number of random samples to try
         minimize: If True, minimize the objective; if False, maximize
         n_jobs: Number of parallel jobs (None = use all CPU cores)
+        penalty_teleport: Penalty for each teleported vehicle
+        penalty_slow: Penalty for each slow vehicle
+        slow_threshold: Speed threshold for slow vehicles in m/s
     
     Returns:
         best_params: Dictionary of best parameters found
@@ -51,7 +55,7 @@ def random_search(objective_function, param_space, n_iterations=100, minimize=Tr
         for param_name, (low, high) in param_space.items():
             # Use randint for integer parameters
             params[param_name] = np.random.randint(low, high + 1)
-        all_params.append((objective_function, params, i))
+        all_params.append((params, i, penalty_teleport, penalty_slow, slow_threshold))
     
     # Run evaluations in parallel
     with mp.Pool(processes=n_jobs) as pool:
@@ -187,7 +191,6 @@ if __name__ == "__main__":
     print()
     
     best_params, best_score, history = random_search(
-        objective_function, 
         param_space, 
         n_iterations=50,  # Adjust based on computational resources
         minimize=True
