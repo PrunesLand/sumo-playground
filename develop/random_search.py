@@ -104,7 +104,7 @@ def objective_function(params, tls_ids):
         traci.close()
     
     # Calculate final score
-    score = total_delay + (num_slow * PENALTY_SLOW)
+    score = total_delay + (remaining_vehicles_count * PENALTY_SLOW)
     
     stats = {
         "score": float(score),
@@ -114,7 +114,7 @@ def objective_function(params, tls_ids):
         "finished_vehicles": int(finished_vehicles_count),
         "remaining_vehicles": int(remaining_vehicles_count),
         "teleported_vehicles": int(num_teleport),
-        "slow_vehicles": int(num_slow),
+        "slow_vehicles_speed_threshold": int(num_slow),
         "simulation_steps": SIMULATION_STEPS
     }
     
@@ -225,5 +225,5 @@ if __name__ == "__main__":
     print(f"Finished Vehicles: {best_stats['finished_vehicles']}")
     print(f"Remaining Vehicles: {best_stats['remaining_vehicles']}")
     # print(f"Teleported Vehicles: {best_stats['teleported_vehicles']}")
-    print(f"Slow Vehicles: {best_stats['slow_vehicles']}")
+    print(f"Slow Vehicles: {best_stats['slow_vehicles_speed_threshold']}")
     print(f"{'='*60}")
