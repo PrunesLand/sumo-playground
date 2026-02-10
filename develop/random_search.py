@@ -4,8 +4,9 @@ from multiprocessing import Pool, cpu_count
 from functools import partial
 import json
 import datetime
+import os
 
-CONFIG_FILE = "osm.sumocfg"
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), "osm.sumocfg")
 SUMO_ARGS = [
     "sumo", 
     "-c", CONFIG_FILE, 
@@ -13,6 +14,10 @@ SUMO_ARGS = [
     "--no-warnings", "true",
     "--time-to-teleport", "-1",  
 ]
+
+NUM_PROCESSORS = 1
+NUM_ITERATIONS = 5
+
 # Parameter constraints: green light 6-82 seconds (red = 90 - green)
 MIN_GREEN = 6
 MAX_GREEN = 82
@@ -173,8 +178,8 @@ if __name__ == "__main__":
     best_params, best_score, best_stats, history = random_search(
         param_space,
         tls_ids,
-        n_iterations=5,
-        n_processors=1
+        n_iterations=NUM_ITERATIONS,
+        n_processors=NUM_PROCESSORS
     )
     
     # Prepare JSON output
