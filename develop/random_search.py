@@ -1,199 +1,98 @@
 import numpy as np
 import libsumo as traci
-import multiprocessing as mp
-import os
 
 CONFIG_FILE = "osm.sumocfg"
+SUMO_ARGS = ["sumo", "-c", CONFIG_FILE, "--no-step-log", "true", "--no-warnings", "true"]
 
-sumo_args = ["sumo", "-c", CONFIG_FILE, "--no-step-log", "true", "--no-warnings", "true"]
+# Parameter space: green light 6-82 seconds (red = 90 - green)
+PARAM_SPACE = {'green_duration': (6, 82)}
 
-
-def _evaluate_params(args):
-    """
-    Helper function to evaluate a single parameter set.
-    This needs to be a top-level function for multiprocessing to pickle it.
-    Calls objective_function directly to avoid pickling libsumo objects.
-    """
-    params, iteration, penalty_teleport, penalty_slow, slow_threshold = args
-    score = objective_function(params, penalty_teleport, penalty_slow, slow_threshold)
-    return iteration, params, score
+# Objective function penalties
+PENALTY_TELEPORT = 100
+PENALTY_SLOW = 10
+SLOW_THRESHOLD = 5.0  # m/s
+SIMULATION_STEPS = 1800
 
 
-def random_search(param_space, n_iterations=100, minimize=True, n_jobs=None, 
-                  penalty_teleport=1000, penalty_slow=10, slow_threshold=5.0):
-    """
-    Parallel random search optimization algorithm.
-    
-    Args:
-        param_space: Dict mapping parameter names to (min, max) tuples
-        n_iterations: Number of random samples to try
-        minimize: If True, minimize the objective; if False, maximize
-        n_jobs: Number of parallel jobs (None = use all CPU cores)
-        penalty_teleport: Penalty for each teleported vehicle
-        penalty_slow: Penalty for each slow vehicle
-        slow_threshold: Speed threshold for slow vehicles in m/s
-    
-    Returns:
-        best_params: Dictionary of best parameters found
-        best_score: Best objective function value
-        history: List of (params, score) tuples for all evaluations
-    """
-    # Determine number of workers
-    if n_jobs is None:
-        n_jobs = mp.cpu_count()
-    
-    print(f"Using {n_jobs} parallel workers")
-    
-    best_score = float('inf') if minimize else float('-inf')
+def random_search(objective_func, param_space, n_iterations=100):
+    """Random search optimization - minimizes the objective function."""
+    best_score = float('inf')
     best_params = None
     history = []
     
-    # Pre-generate all random parameters
-    all_params = []
     for i in range(n_iterations):
-        params = {}
-        for param_name, (low, high) in param_space.items():
-            # Use randint for integer parameters
-            params[param_name] = np.random.randint(low, high + 1)
-        all_params.append((params, i, penalty_teleport, penalty_slow, slow_threshold))
-    
-    # Run evaluations in parallel
-    with mp.Pool(processes=n_jobs) as pool:
-        results = pool.map(_evaluate_params, all_params)
-    
-    # Process results
-    for iteration, params, score in sorted(results, key=lambda x: x[0]):
+        # Sample random parameters
+        params = {name: np.random.randint(low, high + 1) 
+                  for name, (low, high) in param_space.items()}
+        
+        # Evaluate
+        score = objective_func(params)
         history.append((params.copy(), score))
         
-        # Update best if improved
-        if minimize:
-            if score < best_score:
-                best_score = score
-                best_params = params.copy()
-        else:
-            if score > best_score:
-                best_score = score
-                best_params = params.copy()
+        # Update best
+        if score < best_score:
+            best_score = score
+            best_params = params.copy()
         
-        print(f"Iteration {iteration+1}/{n_iterations}: Score = {score:.4f}, Best = {best_score:.4f}")
+        print(f"Iteration {i+1}/{n_iterations}: Score = {score:.2f}, Best = {best_score:.2f}")
     
     return best_params, best_score, history
 
 
-
-# Define parameter space: green light duration from 6 to 82 seconds
-def get_param_space():
-    """
-    Returns the parameter space for random search.
-    Green light duration: 6 to 82 seconds (integers)
-    Red light duration will be automatically calculated as (90 - green_duration)
-    """
-    return {
-        'green_duration': (6, 82)  # Min: 6, Max: 82
-    }
-
-
-def objective_function(params, penalty_teleport=1000, penalty_slow=10, slow_threshold=5.0):
-    """
-    Objective function for traffic light optimization.
-    
-    Args:
-        params: Dictionary with 'green_duration' key
-        penalty_teleport: Penalty for each teleported vehicle (default: 1000)
-        penalty_slow: Penalty for each slow vehicle (default: 10)
-        slow_threshold: Speed threshold for slow vehicles in m/s (default: 5.0)
-    
-    Returns:
-        F(x) = total_delay + (num_teleport × penalty_teleport) + (num_slow × penalty_slow)
-    """
+def objective_function(params):
+    """Calculates: total_delay + (num_teleport × penalty) + (num_slow × penalty)"""
     green_duration = int(params['green_duration'])
-    red_duration = 90 - green_duration  # Total cycle must be 90 seconds
+    red_duration = 90 - green_duration
     
-    # Start SUMO simulation
-    traci.start(sumo_args)
-    
-    # Initialize metrics
+    traci.start(SUMO_ARGS)
     total_delay = 0.0
     num_teleport = 0
     num_slow = 0
     
     try:
-        # Set traffic light timings
-        # Get all traffic light IDs
-        tls_ids = traci.trafficlight.getIDList()
-        
-        for tls_id in tls_ids:
-            # Get the existing traffic light program to understand the state pattern
+        # Set traffic light timings for all traffic lights
+        for tls_id in traci.trafficlight.getIDList():
             existing_logics = traci.trafficlight.getAllProgramLogics(tls_id)
-            if not existing_logics:
+            if not existing_logics or len(existing_logics[0].phases) < 2:
                 continue
             
-            existing_logic = existing_logics[0]
-            
-            # We'll create a simplified 2-phase program using the existing state patterns
-            # Take the first green phase state and first red/yellow phase state as templates
-            if len(existing_logic.phases) < 2:
-                continue
-                
-            # Use existing phase states but modify durations
-            phase_states = [phase.state for phase in existing_logic.phases]
-            
-            # Create simplified 2-phase cycle: use first two phase states as templates
-            # Adjust durations to match our green/red cycle
+            # Use existing phase states with new durations
+            phase_states = [p.state for p in existing_logics[0].phases]
             phases = [
                 traci.trafficlight.Phase(green_duration, phase_states[0]),
-                traci.trafficlight.Phase(red_duration, phase_states[1] if len(phase_states) > 1 else phase_states[0])
+                traci.trafficlight.Phase(red_duration, phase_states[1])
             ]
             
             logic = traci.trafficlight.Logic("random_search", 0, 0, phases)
             traci.trafficlight.setProgramLogic(tls_id, logic)
             traci.trafficlight.setProgram(tls_id, "random_search")
         
-        # Run simulation for a fixed number of steps (e.g., 3600 steps = 1 hour)
-        simulation_steps = 1800
-        
-        for step in range(simulation_steps):
+        # Run simulation
+        for step in range(SIMULATION_STEPS):
             traci.simulationStep()
             
-            # Get all vehicles in the simulation
-            vehicle_ids = traci.vehicle.getIDList()
-            
-            for veh_id in vehicle_ids:
-                # Accumulate waiting time (delay)
-                waiting_time = traci.vehicle.getAccumulatedWaitingTime(veh_id)
-                total_delay += waiting_time
-                
-                # Check if vehicle is slow
-                speed = traci.vehicle.getSpeed(veh_id)
-                if speed < slow_threshold:
+            for veh_id in traci.vehicle.getIDList():
+                total_delay += traci.vehicle.getAccumulatedWaitingTime(veh_id)
+                if traci.vehicle.getSpeed(veh_id) < SLOW_THRESHOLD:
                     num_slow += 1
             
-            # Count teleports (vehicles that got stuck and were removed)
             num_teleport += traci.simulation.getStartingTeleportNumber()
-        
+    
     finally:
         traci.close()
     
-    # Calculate objective function
-    objective_value = total_delay + (num_teleport * penalty_teleport) + (num_slow * penalty_slow)
-    
-    return objective_value
+    return total_delay + (num_teleport * PENALTY_TELEPORT) + (num_slow * PENALTY_SLOW)
 
 
 if __name__ == "__main__":
-    # Get parameter space
-    param_space = get_param_space()
-    
-    # Run random search
     print("Starting random search for traffic light optimization...")
-    print(f"Parameter space: Green light duration = {param_space['green_duration']}")
-    print(f"Total cycle duration = 90 seconds (red = 90 - green)")
-    print()
+    print(f"Parameter space: Green light duration = {PARAM_SPACE['green_duration']}")
+    print(f"Total cycle duration = 90 seconds (red = 90 - green)\n")
     
     best_params, best_score, history = random_search(
-        param_space, 
-        n_iterations=50,  # Adjust based on computational resources
-        minimize=True
+        objective_function, 
+        PARAM_SPACE, 
+        n_iterations=5
     )
     
     print(f"\n{'='*60}")
