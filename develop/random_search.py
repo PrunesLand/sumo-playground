@@ -2,43 +2,68 @@ import numpy as np
 import libsumo as traci
 from multiprocessing import Pool, cpu_count
 from functools import partial
+import json
+import datetime
 
 CONFIG_FILE = "osm.sumocfg"
-SUMO_ARGS = ["sumo", "-c", CONFIG_FILE, "--no-step-log", "true", "--no-warnings", "true"]
-
-# Parameter space: green light 6-82 seconds (red = 90 - green)
-PARAM_SPACE = {'green_duration': (6, 82)}
+SUMO_ARGS = [
+    "sumo", 
+    "-c", CONFIG_FILE, 
+    "--no-step-log", "true", 
+    "--no-warnings", "true",
+    "--time-to-teleport", "-1",  
+]
+# Parameter constraints: green light 6-82 seconds (red = 90 - green)
+MIN_GREEN = 6
+MAX_GREEN = 82
+CYCLE_DURATION = 90
 
 # Objective function penalties
 PENALTY_TELEPORT = 100
 PENALTY_SLOW = 10
 SLOW_THRESHOLD = 5.0  # m/s
-SIMULATION_STEPS = 1800
+SIMULATION_STEPS = 3600
 
 
-def objective_function(params):
-    """Calculates: total_delay + (num_teleport × penalty) + (num_slow × penalty)"""
-    green_duration = int(params['green_duration'])
-    red_duration = 90 - green_duration
-    
+def get_traffic_lights():
+    """Starts a temp simulation to get all traffic light IDs"""
     traci.start(SUMO_ARGS)
+    tls_ids = traci.trafficlight.getIDList()
+    traci.close()
+    return tls_ids
+
+
+def objective_function(params, tls_ids):
+    """Calculates score and returns detailed statistics"""
+    traci.start(SUMO_ARGS)
+    
+    # Stats collectors
     total_delay = 0.0
+    total_waiting_time = 0.0
+    vehicles_evaluated = set()
     num_teleport = 0
     num_slow = 0
     
     try:
-        # Set traffic light timings for all traffic lights
-        for tls_id in traci.trafficlight.getIDList():
+        # Set traffic light timings
+        for tls_id in tls_ids:
+            param_key = f"{tls_id}_green"
+            if param_key not in params:
+                continue
+                
+            green_duration = int(params[param_key])
+            red_duration = CYCLE_DURATION - green_duration
+            
             existing_logics = traci.trafficlight.getAllProgramLogics(tls_id)
             if not existing_logics or len(existing_logics[0].phases) < 2:
                 continue
             
-            # Use existing phase states with new durations
             phase_states = [p.state for p in existing_logics[0].phases]
             phases = [
                 traci.trafficlight.Phase(green_duration, phase_states[0]),
                 traci.trafficlight.Phase(red_duration, phase_states[1])
             ]
+            
             logic = traci.trafficlight.Logic("random_search", 0, 0, phases)
             traci.trafficlight.setProgramLogic(tls_id, logic)
             traci.trafficlight.setProgram(tls_id, "random_search")
@@ -46,48 +71,60 @@ def objective_function(params):
         # Run simulation
         for step in range(SIMULATION_STEPS):
             traci.simulationStep()
-            for veh_id in traci.vehicle.getIDList():
-                total_delay += traci.vehicle.getAccumulatedWaitingTime(veh_id)
+            time_steps_evaluated = 0
+            
+            # Vehicle statistics
+            current_vehicles = traci.vehicle.getIDList()
+            for veh_id in current_vehicles:
+                vehicles_evaluated.add(veh_id)
+                waiting_time = traci.vehicle.getAccumulatedWaitingTime(veh_id)
+                total_delay += waiting_time # Accumulating waiting time at every step is standard but leads to huge numbers
+                                            # Usually we just want the final waiting time, or average. 
+                                            # For objective function consistency check previous implementation:
+                                            # It accumulated waiting time every step. We keep this logic.
+                
                 if traci.vehicle.getSpeed(veh_id) < SLOW_THRESHOLD:
                     num_slow += 1
+            
             num_teleport += traci.simulation.getStartingTeleportNumber()
-    
+            
+        # Post-simulation stats
+        vehicle_count = len(vehicles_evaluated)
+        avg_delay = total_delay / vehicle_count if vehicle_count > 0 else 0
+        
     finally:
         traci.close()
     
-    return total_delay + (num_teleport * PENALTY_TELEPORT) + (num_slow * PENALTY_SLOW)
+    # score = total_delay + (num_teleport * PENALTY_TELEPORT) + (num_slow * PENALTY_SLOW)
+    score = total_delay + (num_slow * PENALTY_SLOW)
+
+    
+    stats = {
+        "score": float(score),
+        "total_delay": float(total_delay),
+        "avg_delay_per_vehicle": float(avg_delay),
+        "vehicle_count": int(vehicle_count),
+        "teleported_vehicles": int(num_teleport),
+        "slow_vehicle_steps": int(num_slow),
+        "simulation_steps": SIMULATION_STEPS
+    }
+    
+    return score, stats
 
 
-def evaluate_single_iteration(iteration_num, param_space):
-    """Wrapper function for a single iteration - used by multiprocessing"""
-    # Sample random parameters
+def evaluate_single_iteration(iteration_num, param_space, tls_ids):
+    """Wrapper function for a single iteration"""
     params = {name: np.random.randint(low, high + 1) 
               for name, (low, high) in param_space.items()}
     
-    # Evaluate
-    score = objective_function(params)
+    score, stats = objective_function(params, tls_ids)
     
-    print(f"Iteration {iteration_num + 1} completed: Score = {score:.2f}, Params = {params}")
-    
-    return params, score
+    print(f"Iteration {iteration_num + 1}: Score = {score:.2f}, Vehicles = {stats['vehicle_count']}")
+    return params, score, stats
 
 
-def random_search(objective_func, param_space, n_iterations=100, n_processors=None):
-    """
-    Random search optimization with multiprocessing - minimizes the objective function.
-    
-    Args:
-        objective_func: The function to optimize (not used directly, but kept for API compatibility)
-        param_space: Dictionary defining parameter ranges
-        n_iterations: Number of random samples to evaluate
-        n_processors: Number of processors to use (None = all available, -1 = all but one)
-    
-    Returns:
-        best_params: Best parameters found
-        best_score: Best score achieved
-        history: List of (params, score) tuples for all iterations
-    """
-    # Determine number of processors
+def random_search(param_space, tls_ids, n_iterations=100, n_processors=None):
+    """Random search optimization with multiprocessing"""
     if n_processors is None:
         n_proc = cpu_count()
     elif n_processors == -1:
@@ -99,50 +136,82 @@ def random_search(objective_func, param_space, n_iterations=100, n_processors=No
     
     best_score = float('inf')
     best_params = None
+    best_stats = None
     history = []
     
-    # Create partial function with fixed param_space
-    eval_func = partial(evaluate_single_iteration, param_space=param_space)
+    eval_func = partial(evaluate_single_iteration, param_space=param_space, tls_ids=tls_ids)
     
-    # Run parallel evaluations
     with Pool(processes=n_proc) as pool:
         results = pool.map(eval_func, range(n_iterations))
     
-    # Process results
-    for i, (params, score) in enumerate(results):
-        history.append((params, score))
+    for i, (params, score, stats) in enumerate(results):
+        history.append({
+            "iteration": i + 1,
+            "score": score,
+            "parameters": params,
+            "stats": stats
+        })
         
-        # Update best
         if score < best_score:
             best_score = score
             best_params = params.copy()
+            best_stats = stats.copy()
             print(f"New best found at iteration {i+1}: Score = {best_score:.2f}")
     
-    return best_params, best_score, history
+    return best_params, best_score, best_stats, history
 
 
 if __name__ == "__main__":
-    print("Starting random search for traffic light optimization...")
-    print(f"Parameter space: Green light duration = {PARAM_SPACE['green_duration']}")
-    print(f"Total cycle duration = 90 seconds (red = 90 - green)\n")
+    print("Detecting traffic lights...")
+    tls_ids = get_traffic_lights()
     
-    # Choose number of processors:
-    # None = use all available processors
-    # -1 = use all but one processor
-    # N = use exactly N processors
-    NUM_PROCESSORS = 1  # Adjust this value as needed
+    param_space = {f"{tid}_green": (MIN_GREEN, MAX_GREEN) for tid in tls_ids}
     
-    best_params, best_score, history = random_search(
-        objective_function, 
-        PARAM_SPACE, 
+    print("Starting optimization...")
+    print(f"Total variables: {len(param_space)}")
+    
+    best_params, best_score, best_stats, history = random_search(
+        param_space,
+        tls_ids,
         n_iterations=5,
-        n_processors=NUM_PROCESSORS
+        n_processors=1
     )
+    
+    # Prepare JSON output
+    output_data = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "optimization_config": {
+            "iterations": 5,
+            "cycle_duration": CYCLE_DURATION,
+            "penalties": {
+                "teleport": PENALTY_TELEPORT,
+                "slow": PENALTY_SLOW
+            }
+        },
+        "best_solution": {
+            "score": best_score,
+            "configurations": {},
+            "performance_stats": best_stats
+        }
+    }
+    
+    # Format best configuration nicely
+    for tls_id in tls_ids:
+        green = best_params[f"{tls_id}_green"]
+        output_data["best_solution"]["configurations"][tls_id] = {
+            "green_duration": int(green),
+            "red_duration": int(CYCLE_DURATION - green)
+        }
+
+    # Save to file
+    json_filename = "random_search_results.json"
+    with open(json_filename, "w") as f:
+        json.dump(output_data, f, indent=4)
     
     print(f"\n{'='*60}")
     print(f"Optimization Complete!")
-    print(f"{'='*60}")
-    print(f"Best green light duration: {best_params['green_duration']} seconds")
-    print(f"Best red light duration: {90 - best_params['green_duration']} seconds")
+    print(f"Results saved to: {json_filename}")
     print(f"Best objective score: {best_score:.2f}")
+    print(f"Total Vehicles: {best_stats['vehicle_count']}")
+    # print(f"Total Teleports: {best_stats['teleported_vehicles']}")
     print(f"{'='*60}")
